@@ -2,21 +2,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
+#include <threads.h>
 #include <unistd.h>
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
 #define THREAD_POOL_SIZE 10
+#define SLEEP_PERIOD 20000
 
-void handle_request(int remote_sockfd) {
-  int nread, nwrite;
+mtx_t counter_mtx;
+
+int handle_request(void *arg) {
+  int static counter = 0;
+
+  int remote_sockfd, nread, nwrite;
   char buffer[BUFFER_SIZE],
       response[BUFFER_SIZE] =
           "http/1.0 200 OK\r\nServer: HTTP-Server-C\r\nContent-type: "
-          "text/html\r\n\r\n<html><body><h1>%.*s</h1></body></html>\r\n";
-
+          "text/html\r\n\r\n<html><body><h1>Request Number: "
+          "%d</h1></body></html>\r\n";
   char method[100], resource[100], version[100];
+  remote_sockfd = *(int *)arg;
+
   // read data from the remote socket file
   nread = read(remote_sockfd, (void *)buffer, BUFFER_SIZE);
   if (nread == -1) {
@@ -29,16 +36,21 @@ void handle_request(int remote_sockfd) {
     exit(EXIT_FAILURE);
   }
 
-  printf("method: %s\nresource: %s\nversion: %s\n", method, resource, version);
+  sleep(4);
+
+  mtx_lock(&counter_mtx);
+  ++counter;
+
+  // 0.02 seconds
+  usleep(SLEEP_PERIOD);
 
   // prepare the HTTP response
-  char resp_message[BUFFER_SIZE];
-  sprintf(resp_message, "%.*s", nread, buffer);
-  nwrite = sprintf(buffer, response, nread, resp_message);
+  nwrite = sprintf(buffer, response, counter);
   if (nwrite == -1) {
     perror("(sprintf)");
     exit(EXIT_FAILURE);
   }
+  mtx_unlock(&counter_mtx);
 
   // write a response to the remote socket file
   nwrite = write(remote_sockfd, buffer, nwrite);
@@ -49,6 +61,7 @@ void handle_request(int remote_sockfd) {
 
   // close remote socket
   close(remote_sockfd);
+  return 0;
 }
 
 int main(void) {
@@ -93,6 +106,9 @@ int main(void) {
   }
   printf("Listening on http://%s:%d\n", inet_ntoa(local_addr.sin_addr), PORT);
 
+  // initialize the mutex
+  mtx_init(&counter_mtx, mtx_plain);
+
   // accept new requests
   while (1) {
     // create a socket for remote host (i.e. client)
@@ -103,6 +119,8 @@ int main(void) {
       return EXIT_FAILURE;
     }
 
-    handle_request(remote_sockfd);
+    thrd_t thread;
+    thrd_create(&thread, handle_request, (void *)&remote_sockfd);
+    thrd_detach(thread);
   }
 }
